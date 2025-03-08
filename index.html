@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>20Hz Tone Player</title>
+    <style>
+      @font-face {
+        font-family: "PixelFont";
+        src: url("https://fonts.cdnfonts.com/s/18595/PressStart2P-Regular.woff")
+          format("woff");
+      }
+      body {
+        background-color: black;
+        color: limegreen;
+        font-family: "PixelFont", sans-serif;
+        text-align: center;
+        padding: 20px;
+        font-size: 16px;
+      }
+      #status {
+        font-size: 18px;
+        color: limegreen;
+        text-transform: uppercase;
+      }
+      .playing {
+        color: red;
+        font-weight: bold;
+      }
+      button {
+        background: black;
+        color: limegreen;
+        font-size: 16px;
+        border: 2px solid limegreen;
+        padding: 10px 20px;
+        cursor: pointer;
+        font-family: "PixelFont", sans-serif;
+        text-transform: uppercase;
+        margin: 10px;
+      }
+      button:hover {
+        background: limegreen;
+        color: black;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>20Hz Tone Player</h1>
+    <p id="status">Status: Stopped</p>
+    <button id="play">▶ Play</button>
+    <button id="stop">■ Stop</button>
+
+    <script>
+      let audioInstance = null;
+      const statusText = document.getElementById("status");
+
+      function updateStatus(isPlaying) {
+        if (isPlaying) {
+          statusText.textContent = "Status: Playing...";
+          statusText.classList.add("playing");
+        } else {
+          statusText.textContent = "Status: Stopped";
+          statusText.classList.remove("playing");
+        }
+      }
+
+      document.getElementById("play").addEventListener("click", () => {
+        if (!audioInstance) {
+          audioInstance = window.electronAPI.playTone();
+          updateStatus(true);
+        }
+      });
+
+      document.getElementById("stop").addEventListener("click", () => {
+        window.electronAPI.stopTone(audioInstance);
+        audioInstance = null;
+        updateStatus(false);
+      });
+
+      // Listen for sound state changes (sync with tray menu)
+      window.electronAPI.onSoundStateChange((state) => {
+        updateStatus(state);
+      });
+    </script>
+  </body>
+</html>

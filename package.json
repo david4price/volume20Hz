@@ -1,0 +1,25 @@
+{
+  "name": "volume20hz",
+  "version": "1.0.0",
+  "description": "",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {},
+  "devDependencies": {
+    "electron": "^35.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.yourcompany.20hzplayer",
+    "productName": "20HzPlayer",
+    "mac": {
+      "icon": "build/icon.icns"
+    }
+  }
+}
