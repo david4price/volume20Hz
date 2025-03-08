@@ -73,7 +73,6 @@ This will generate a **.dmg installer** and **.app** file inside the `dist/` fol
 ## ⚠️ **Known Issues (aka Features)**  
 
 🐕 **Might make your dog tilt its head** – Some dogs hear 20Hz, mine just ignores it. 🤷‍♂️  
-🔇 **Doesn’t work on Windows** – Polk Audio bars don’t need this trick on Windows.  
 🍵 **Still doesn’t make your Polk Audio soundbar fetch coffee.**  
 
 ---
