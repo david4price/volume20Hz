@@ -2,18 +2,12 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>20Hz Tone Player</title>
     <style>
-      @font-face {
-        font-family: "PixelFont";
-        src: url("https://fonts.cdnfonts.com/s/18595/PressStart2P-Regular.woff")
-          format("woff");
-      }
       body {
         background-color: black;
         color: limegreen;
-        font-family: "PixelFont", sans-serif;
+        font-family: sans-serif;
         text-align: center;
         padding: 20px;
         font-size: 16px;
@@ -33,10 +27,8 @@
         font-size: 16px;
         border: 2px solid limegreen;
         padding: 10px 20px;
-        cursor: pointer;
-        font-family: "PixelFont", sans-serif;
-        text-transform: uppercase;
         margin: 10px;
+        cursor: pointer;
       }
       button:hover {
         background: limegreen;
@@ -47,14 +39,15 @@
   <body>
     <h1>20Hz Tone Player</h1>
     <p id="status">Status: Stopped</p>
-    <button id="play">▶ Play</button>
-    <button id="stop">■ Stop</button>
+    <button id="playBtn">Play</button>
+    <button id="stopBtn">Stop</button>
 
     <script>
-      let audioInstance = null;
+      let isPlaying = false;
       const statusText = document.getElementById("status");
 
-      function updateStatus(isPlaying) {
+      function updateStatus(newState) {
+        isPlaying = newState;
         if (isPlaying) {
           statusText.textContent = "Status: Playing...";
           statusText.classList.add("playing");
@@ -64,22 +57,21 @@
         }
       }
 
-      document.getElementById("play").addEventListener("click", () => {
-        if (!audioInstance) {
-          audioInstance = window.electronAPI.playTone();
-          updateStatus(true);
+      document.getElementById("playBtn").addEventListener("click", () => {
+        if (!isPlaying) {
+          window.electronAPI.playTone();
         }
       });
 
-      document.getElementById("stop").addEventListener("click", () => {
-        window.electronAPI.stopTone(audioInstance);
-        audioInstance = null;
-        updateStatus(false);
+      document.getElementById("stopBtn").addEventListener("click", () => {
+        if (isPlaying) {
+          window.electronAPI.stopTone();
+        }
       });
 
-      // Listen for sound state changes (sync with tray menu)
-      window.electronAPI.onSoundStateChange((state) => {
-        updateStatus(state);
+      // Listen for "sound-state" from main => update UI
+      window.electronAPI.onSoundStateChange((playing) => {
+        updateStatus(playing);
       });
     </script>
   </body>
