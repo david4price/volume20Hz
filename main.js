@@ -90,8 +90,8 @@ function handlePlaySound(sender) {
 
   // Start volume from 0
   currentVolume = 0.0;
-  const targetVolume = 0.5;
-  const step = 0.01;
+  const targetVolume = 0.05;
+  const step = 0.001
 
   rampInterval = setInterval(() => {
     // If user hit "Stop" mid-ramp, break out
@@ -109,7 +109,7 @@ function handlePlaySound(sender) {
       clearInterval(rampInterval);
       rampInterval = null;
     }
-  }, 500);
+  }, 250);
 
   sender.send("sound-state", true);
 }
@@ -127,7 +127,7 @@ function handleStopSound(sender) {
   }
 
   // Ramp from currentVolume down to 0
-  const step = 0.03;
+  const step = 0.001;
 
   rampInterval = setInterval(() => {
     if (currentVolume > 0) {
