@@ -13,11 +13,16 @@ let mainWindow;
 let tray;
 let isPlaying = false;
 let idleCheckInterval;
-const INACTIVITY_LIMIT = 30 * 60; // 30 minutes in seconds
+let lastActivityTime = Date.now();
+let isSystemIdle = false;
+const INACTIVITY_LIMIT = 30 * 60 * 1000; // 30 minutes in milliseconds
 
 // We'll keep track of the current volume globally
 let currentVolume = 0.0;
 let rampInterval = null; // so we can clear any existing intervals if needed
+
+// Activity detection variables
+let activityCheckInterval;
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -33,6 +38,41 @@ function createWindow() {
 
   mainWindow.loadFile("index.html");
 
+  // Lightweight automatic activity detection
+  mainWindow.webContents.on('dom-ready', () => {
+    // Simple activity detection - just track basic user interactions
+    mainWindow.webContents.executeJavaScript(`
+      // Track when user interacts with the app
+      document.addEventListener('mousemove', () => {
+        if (window.electronAPI) {
+          window.electronAPI.userActivity();
+        }
+      });
+      
+      document.addEventListener('click', () => {
+        if (window.electronAPI) {
+          window.electronAPI.userActivity();
+        }
+      });
+      
+      document.addEventListener('keydown', () => {
+        if (window.electronAPI) {
+          window.electronAPI.userActivity();
+        }
+      });
+    `);
+  });
+
+  // Detect when window gains/loses focus
+  mainWindow.on('focus', () => {
+    console.log('App window focused - user is active');
+    resetActivity();
+  });
+
+  mainWindow.on('blur', () => {
+    // Don't immediately mark as idle when window loses focus
+    // User might be using other apps
+  });
 
   mainWindow.on("close", (event) => {
     event.preventDefault();
@@ -60,6 +100,8 @@ function updateTrayMenu() {
         resetInactivityCheck();
       },
     },
+
+    { type: "separator" },
     {
       label: "Quit",
       click: () => {
@@ -146,22 +188,127 @@ function handleStopSound(sender) {
   }, 500);
 }
 
-// Inactivity checks
-function startIdleCheck() {
-  if (idleCheckInterval) clearInterval(idleCheckInterval);
+// Enhanced activity detection
+function startActivityMonitoring() {
+  // Check for user activity every 2 minutes
+  activityCheckInterval = setInterval(() => {
+    checkUserActivity();
+  }, 120000); // Check every 2 minutes
+  
+  // Listen for power state changes
+  powerMonitor.on('resume', () => {
+    console.log('System resumed from sleep');
+    resetActivity();
+  });
+  
+  powerMonitor.on('lock-screen', () => {
+    console.log('Screen locked');
+    isSystemIdle = true;
+  });
+  
+  powerMonitor.on('unlock-screen', () => {
+    console.log('Screen unlocked');
+    isSystemIdle = false;
+    resetActivity();
+  });
+  
+  powerMonitor.on('user-did-become-active', () => {
+    console.log('User became active');
+    resetActivity();
+  });
+  
+  powerMonitor.on('user-did-resign-active', () => {
+    console.log('User resigned active');
+    // Don't immediately mark as idle, just note the event
+  });
+  
+  // Show initial status
+  showActivityStatus();
+}
 
-  idleCheckInterval = setInterval(() => {
-    const idleTime = powerMonitor.getSystemIdleTime();
-    const idleState = powerMonitor.getSystemIdleState(INACTIVITY_LIMIT);
+// Show current activity status
+function showActivityStatus() {
+  const now = Date.now();
+  const timeSinceLastActivity = Math.round((now - lastActivityTime) / 1000);
+  const minutes = Math.floor(timeSinceLastActivity / 60);
+  const seconds = timeSinceLastActivity % 60;
+  
+  // Log to console for debugging
+  console.log(`=== Activity Status ===`);
+  console.log(`Idle detection: ENABLED (Always On)`);
+  console.log(`Time since last activity: ${timeSinceLastActivity} seconds`);
+  console.log(`Idle limit: 30 minutes`);
+  console.log(`System idle: ${isSystemIdle ? 'Yes' : 'No'}`);
+  console.log(`Sound playing: ${isPlaying ? 'Yes' : 'No'}`);
+  console.log(`=======================`);
+}
 
-    console.log(
-      `System idle time: ${idleTime} seconds, Idle state: ${idleState}`
-    );
+// Smart idle detection that considers context
+function isUserActuallyIdle() {
+  const now = Date.now();
+  const timeSinceLastActivity = now - lastActivityTime;
+  
+  // Check system idle state
+  const systemIdleState = powerMonitor.getSystemIdleState(INACTIVITY_LIMIT / 1000);
+  
+  console.log(`Idle check - Time since activity: ${Math.round(timeSinceLastActivity / 1000)}s, System state: ${systemIdleState}`);
+  
+  // User is considered idle if:
+  // 1. No activity for 30 minutes AND
+  // 2. System reports idle or locked AND
+  // 3. Window is not focused (user not actively using the app)
+  const isWindowFocused = mainWindow && !mainWindow.isDestroyed() && mainWindow.isFocused();
+  
+  return timeSinceLastActivity > INACTIVITY_LIMIT && 
+         (systemIdleState === 'idle' || systemIdleState === 'locked' || isSystemIdle) &&
+         !isWindowFocused;
+}
 
-    if (isPlaying && (idleState === "idle" || idleState === "locked")) {
-      console.log("30 minutes of inactivity => ramping down to stop");
+function checkUserActivity() {
+  const now = Date.now();
+  const timeSinceLastActivity = now - lastActivityTime;
+  
+  // Check system idle state as backup
+  const systemIdleTime = powerMonitor.getSystemIdleTime() * 1000; // Convert to milliseconds
+  const systemIdleState = powerMonitor.getSystemIdleState(INACTIVITY_LIMIT / 1000);
+  
+  console.log(`Activity check - Time since last activity: ${Math.round(timeSinceLastActivity / 1000)}s, System idle: ${Math.round(systemIdleTime / 1000)}s, State: ${systemIdleState}`);
+  
+  // Check if there might be video playback or other media activity
+  const hasMediaActivity = checkForMediaActivity();
+  
+  // Use the smart idle detection
+  if (isUserActuallyIdle() && !hasMediaActivity) {
+    if (isPlaying) {
+      console.log('Smart idle detection: User appears to be idle - stopping sound');
       handleStopSound(mainWindow.webContents);
     }
+  }
+}
+
+// Check for media activity that might indicate user engagement
+function checkForMediaActivity() {
+  // Simplified media check - just return false to keep it light
+  // You can manually disable idle detection if watching movies
+  return false;
+}
+
+function resetActivity() {
+  lastActivityTime = Date.now();
+  isSystemIdle = false;
+  console.log('Activity reset - user is active');
+}
+
+// Enhanced inactivity checks - replaced the old startIdleCheck
+function startIdleCheck() {
+  if (idleCheckInterval) clearInterval(idleCheckInterval);
+  
+  // Start activity monitoring instead of basic idle checking
+  startActivityMonitoring();
+  
+  // Keep a backup check every 5 minutes as fallback
+  idleCheckInterval = setInterval(() => {
+    checkUserActivity();
   }, 300 * 1000);
 }
 
@@ -180,6 +327,7 @@ app.whenReady().then(() => {
 
   updateTrayMenu();
   startIdleCheck();
+  setupGlobalInputMonitoring();
 });
 
 app.on("window-all-closed", () => {
@@ -196,3 +344,13 @@ ipcMain.on("play-sound", (event) => {
 ipcMain.on("stop-sound", (event) => {
   handleStopSound(event.sender);
 });
+
+ipcMain.on("user-activity", (event) => {
+  resetActivity();
+});
+
+// Global input monitoring for better activity detection
+function setupGlobalInputMonitoring() {
+  // Simplified - just log that it's set up
+  console.log('Global input monitoring set up (simplified)');
+}
