@@ -1,89 +1,75 @@
 #import <AppKit/AppKit.h>
-#import <AVFoundation/AVFoundation.h>
-#import <CoreAudio/CoreAudio.h>
 #include <stdbool.h>
-#include <stdio.h>
+#include <stdint.h>
+#import "audio.h"
 
 extern void app_event(int event);
-extern void *tone_create(void);
-extern void tone_destroy(void *tone);
-extern void tone_render(void *tone, float *buffer, size_t frames, double rate);
+extern void app_set_gain(float percent);
+extern void app_set_lock_minutes(uint32_t minutes);
 
-static AVAudioEngine *engine;
-static AVAudioSourceNode *source;
-static AudioObjectPropertyListenerBlock routeListener;
-static NSMenuItem *toggle;
-static NSTextField *statusLabel;
+enum Event {
+    Play = 0, Stop, Lock, Unlock, Wake, RouteChanged, Tick, Quit,
+};
+
+enum PlaybackStatus {
+    Stopped = 0, FadingIn, Playing, FadingOut, WaitingForSoundbar, Unavailable,
+    StoppedAfterLock, FadingOutAfterLock,
+};
+
+static NSString *const outputUIDKey = @"SoundbarOutputUID";
+static NSString *const outputNameKey = @"SoundbarOutputName";
+static NSString *const gainKey = @"ToneGainPercent";
+static NSString *const lockMinutesKey = @"LockTimeoutMinutes";
+
+static NSStatusBarButton *statusButton;
+static NSMenuItem *toggle, *menuStatus, *menuOutput;
+static NSTextField *statusLabel, *outputLabel;
 static NSButton *playButton, *stopButton;
+static NSString *selectedOutputUID, *savedOutputName;
 static int currentState = -1;
+static BOOL playbackRequested;
 static NSColor *windowGreen(void);
 
-@interface ToneContext : NSObject
-@property(nonatomic, readonly) void *tone;
-@end
-
-@implementation ToneContext
-- (instancetype)init {
-    if ((self = [super init])) _tone = tone_create();
-    return self;
-}
-- (void)dealloc { tone_destroy(_tone); }
-@end
-
-void stop_audio(void) {
-    [engine stop];
-    if (source) [engine detachNode:source];
-    source = nil;
-    engine = nil;
+static void showOutput(void) {
+    NSString *name = audio_output_name();
+    NSString *text;
+    if (name.length) {
+        text = [@"Output: " stringByAppendingString:name];
+    } else if (selectedOutputUID) {
+        text = [@"Soundbar: " stringByAppendingString:savedOutputName ?: @"Selected output"];
+    } else {
+        text = @"Output: Unavailable";
+    }
+    menuOutput.title = text;
+    outputLabel.stringValue = text;
+    outputLabel.toolTip = text;
 }
 
-bool start_audio(void) {
-    engine = [AVAudioEngine new];
-    AVAudioFormat *output = [engine.outputNode outputFormatForBus:0];
-    double rate = output.sampleRate;
-    if (rate <= 0 || output.channelCount == 0) {
-        stop_audio();
-        return false;
-    }
-    AVAudioFormat *format = [[AVAudioFormat alloc] initStandardFormatWithSampleRate:rate
-                                                                        channels:output.channelCount];
-    if (!format) {
-        stop_audio();
-        return false;
-    }
-    ToneContext *context = [ToneContext new];
-    source = [[AVAudioSourceNode alloc] initWithFormat:format
-        renderBlock:^OSStatus(BOOL *silence, const AudioTimeStamp *time,
-                              AVAudioFrameCount frames, AudioBufferList *buffers) {
-        if (!frames || !buffers->mNumberBuffers) return noErr;
-        float *first = buffers->mBuffers[0].mData;
-        tone_render(context.tone, first, frames, rate);
-        for (UInt32 channel = 1; channel < buffers->mNumberBuffers; channel++) {
-            memcpy(buffers->mBuffers[channel].mData, first, frames * sizeof(float));
-        }
-        return noErr;
-    }];
-    [engine attachNode:source];
-    [engine connect:source to:engine.mainMixerNode format:format];
-
-    NSError *error = nil;
-    if (![engine startAndReturnError:&error]) {
-        NSLog(@"Audio output unavailable: %@", error);
-        stop_audio();
-        return false;
-    }
-    return true;
-}
-
-void show_state(int state) {
-    if (currentState == state) return;
+void show_state(int state, bool requested) {
+    if (currentState == state && playbackRequested == requested) return;
     currentState = state;
-    NSArray<NSString *> *labels = @[@"Stopped", @"Fading in…", @"Playing", @"Fading out…", @"Audio output unavailable"];
-    BOOL playing = state == 1 || state == 2;
-    statusLabel.stringValue = [[@"Status: " stringByAppendingString:labels[state]] uppercaseString];
-    statusLabel.textColor = playing ? NSColor.systemRedColor : windowGreen();
-    statusLabel.font = playing ? [NSFont boldSystemFontOfSize:18] : [NSFont systemFontOfSize:18];
-    toggle.title = playing ? @"Stop Sound" : @"Play Sound";
+    playbackRequested = requested;
+    NSArray<NSString *> *labels = @[@"Stopped", @"Fading in…", @"Playing", @"Fading out…",
+        @"Waiting for soundbar", @"Audio output unavailable", @"Stopped after screen lock",
+        @"Fading out after screen lock…"];
+    NSString *status = labels[state];
+    BOOL audible = state == FadingIn || state == Playing || state == FadingOut
+        || state == FadingOutAfterLock;
+    statusLabel.stringValue = status;
+    menuStatus.title = status;
+    toggle.title = requested ? @"Stop Sound" : @"Play Sound";
+    playButton.enabled = !requested;
+    stopButton.enabled = requested;
+    if (statusButton.image) {
+        statusButton.imagePosition = audible ? NSImageLeft : NSImageOnly;
+        statusButton.title = audible ? @"•" : @"";
+    } else {
+        statusButton.title = audible ? @"20 Hz •" : @"20 Hz";
+    }
+    NSString *description = [@"20HzPlayer, " stringByAppendingString:status];
+    statusButton.toolTip = description;
+    [statusButton setAccessibilityLabel:description];
+    showOutput();
 }
 
 static NSColor *windowGreen(void) {
@@ -116,7 +102,7 @@ static NSTextField *windowLabel(NSString *text, NSRect frame, NSFont *font) {
 
 - (void)resetCursorRects {
     [super resetCursorRects];
-    [self addCursorRect:self.bounds cursor:NSCursor.pointingHandCursor];
+    if (self.enabled) [self addCursorRect:self.bounds cursor:NSCursor.pointingHandCursor];
 }
 
 - (void)mouseEntered:(NSEvent *)event { [self applyHover:YES]; }
@@ -127,10 +113,18 @@ static NSTextField *windowLabel(NSString *text, NSRect frame, NSFont *font) {
     [self applyHover:self.window.isKeyWindow && NSMouseInRect(pointer, self.bounds, self.isFlipped)];
 }
 
+- (void)setEnabled:(BOOL)enabled {
+    [super setEnabled:enabled];
+    [self.window invalidateCursorRectsForView:self];
+    [self updateAppearance];
+}
+
 - (void)applyHover:(BOOL)hovered {
+    hovered = hovered && self.enabled;
     self.layer.backgroundColor = (hovered ? windowGreen() : NSColor.blackColor).CGColor;
+    NSColor *titleColor = self.enabled ? windowGreen() : NSColor.systemGrayColor;
     self.attributedTitle = [[NSAttributedString alloc] initWithString:self.title attributes:@{
-        NSForegroundColorAttributeName: hovered ? NSColor.blackColor : windowGreen(),
+        NSForegroundColorAttributeName: hovered ? NSColor.blackColor : titleColor,
         NSFontAttributeName: [NSFont systemFontOfSize:16],
     }];
 }
@@ -150,10 +144,17 @@ static NSButton *windowButton(NSString *title, NSRect frame, id target, SEL acti
     return button;
 }
 
-@interface AppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate>
+static NSMenu *submenu(NSMenu *parent, NSString *title) {
+    NSMenuItem *item = [parent addItemWithTitle:title action:nil keyEquivalent:@""];
+    item.submenu = [[NSMenu alloc] initWithTitle:title];
+    return item.submenu;
+}
+
+@interface AppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate>
 @property(nonatomic, strong) NSStatusItem *item;
 @property(nonatomic, strong) NSWindow *window;
 @property(nonatomic, strong) NSTimer *timer;
+@property(nonatomic, strong) NSMenu *outputMenu, *gainMenu, *timeoutMenu;
 - (void)quit:(id)sender;
 @end
 
@@ -161,16 +162,23 @@ static NSButton *windowButton(NSString *title, NSRect frame, id target, SEL acti
 
 - (void)applicationDidFinishLaunching:(NSNotification *)note {
     self.item = [NSStatusBar.systemStatusBar statusItemWithLength:NSVariableStatusItemLength];
+    statusButton = self.item.button;
     NSString *icon = [NSBundle.mainBundle pathForResource:@"tray" ofType:@"png"];
-    NSImage *image = icon ? [[NSImage alloc] initWithContentsOfFile:icon] : nil;
-    self.item.button.image = image;
-    if (!image) self.item.button.title = @"20 Hz";
-    self.item.button.toolTip = @"20HzPlayer";
+    statusButton.image = icon ? [[NSImage alloc] initWithContentsOfFile:icon] : nil;
     NSMenu *menu = [NSMenu new];
+    menuStatus = [menu addItemWithTitle:@"Stopped" action:nil keyEquivalent:@""];
+    menuOutput = [menu addItemWithTitle:@"" action:nil keyEquivalent:@""];
+    [menu addItem:NSMenuItem.separatorItem];
     toggle = [menu addItemWithTitle:@"Play Sound" action:@selector(toggle:) keyEquivalent:@""];
     toggle.target = self;
-    [menu addItem:NSMenuItem.separatorItem];
     [menu addItemWithTitle:@"Show Window" action:@selector(showWindow:) keyEquivalent:@""].target = self;
+    [menu addItem:NSMenuItem.separatorItem];
+    self.outputMenu = submenu(menu, @"Soundbar Output");
+    self.gainMenu = submenu(menu, @"Tone Gain");
+    self.timeoutMenu = submenu(menu, @"Stop After Screen Lock");
+    self.outputMenu.delegate = self;
+    self.gainMenu.delegate = self;
+    self.timeoutMenu.delegate = self;
     [menu addItem:NSMenuItem.separatorItem];
     [menu addItemWithTitle:@"Quit" action:@selector(quit:) keyEquivalent:@"q"].target = self;
     self.item.menu = menu;
@@ -185,11 +193,14 @@ static NSButton *windowButton(NSString *title, NSRect frame, id target, SEL acti
     self.window.backgroundColor = NSColor.blackColor;
     NSTextField *heading = windowLabel(@"20HzPlayer", NSMakeRect(20, 188, 310, 42),
         [NSFont boldSystemFontOfSize:32]);
-    statusLabel = windowLabel(@"", NSMakeRect(20, 146, 310, 26), [NSFont systemFontOfSize:18]);
-    playButton = windowButton(@"Play", NSMakeRect(87, 84, 76, 42), self, @selector(play:));
-    stopButton = windowButton(@"Stop", NSMakeRect(187, 84, 76, 42), self, @selector(stop:));
+    statusLabel = windowLabel(@"", NSMakeRect(20, 150, 310, 26), [NSFont systemFontOfSize:18]);
+    outputLabel = windowLabel(@"", NSMakeRect(20, 124, 310, 22), [NSFont systemFontOfSize:13]);
+    outputLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+    playButton = windowButton(@"Play", NSMakeRect(87, 62, 76, 42), self, @selector(play:));
+    stopButton = windowButton(@"Stop", NSMakeRect(187, 62, 76, 42), self, @selector(stop:));
     [self.window.contentView addSubview:heading];
     [self.window.contentView addSubview:statusLabel];
+    [self.window.contentView addSubview:outputLabel];
     [self.window.contentView addSubview:playButton];
     [self.window.contentView addSubview:stopButton];
 
@@ -200,33 +211,115 @@ static NSButton *windowButton(NSString *title, NSRect frame, id target, SEL acti
         object:nil suspensionBehavior:NSNotificationSuspensionBehaviorDeliverImmediately];
     [NSWorkspace.sharedWorkspace.notificationCenter addObserver:self selector:@selector(woke:)
         name:NSWorkspaceDidWakeNotification object:nil];
-    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(engineChanged:)
-        name:AVAudioEngineConfigurationChangeNotification object:nil];
 
-    AudioObjectPropertyAddress address = {kAudioHardwarePropertyDefaultOutputDevice,
-        kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain};
-    routeListener = ^(UInt32 count, const AudioObjectPropertyAddress *addresses) {
-        app_event(5);
-    };
-    OSStatus result = AudioObjectAddPropertyListenerBlock(kAudioObjectSystemObject, &address,
-        dispatch_get_main_queue(), routeListener);
-    if (result != noErr) NSLog(@"Default audio output monitoring unavailable: %d", (int)result);
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    [defaults registerDefaults:@{gainKey: @5, lockMinutesKey: @60}];
+    selectedOutputUID = [defaults stringForKey:outputUIDKey];
+    savedOutputName = [defaults stringForKey:outputNameKey];
+    audio_select_output(selectedOutputUID);
+    app_set_gain([defaults floatForKey:gainKey]);
+    app_set_lock_minutes((uint32_t)[defaults integerForKey:lockMinutesKey]);
+    [self menuNeedsUpdate:self.outputMenu];
+    [self menuNeedsUpdate:self.gainMenu];
+    [self menuNeedsUpdate:self.timeoutMenu];
+    audio_observe_route_changes(^{
+        app_event(RouteChanged);
+        showOutput();
+    });
 
     self.timer = [NSTimer timerWithTimeInterval:0.2 repeats:YES block:^(NSTimer *timer) {
-        app_event(6);
+        app_event(Tick);
     }];
     [NSRunLoop.mainRunLoop addTimer:self.timer forMode:NSRunLoopCommonModes];
-    app_event(6);
 }
 
-- (void)toggle:(id)sender { app_event(currentState == 1 || currentState == 2 ? 1 : 0); }
-- (void)play:(id)sender { if (currentState != 1 && currentState != 2) app_event(0); }
-- (void)stop:(id)sender { if (currentState == 1 || currentState == 2) app_event(1); }
-- (void)locked:(NSNotification *)note { dispatch_async(dispatch_get_main_queue(), ^{ app_event(2); }); }
-- (void)unlocked:(NSNotification *)note { dispatch_async(dispatch_get_main_queue(), ^{ app_event(3); }); }
-- (void)woke:(NSNotification *)note { dispatch_async(dispatch_get_main_queue(), ^{ app_event(4); }); }
-- (void)engineChanged:(NSNotification *)note {
-    dispatch_async(dispatch_get_main_queue(), ^{ if (note.object == engine) app_event(5); });
+- (void)menuNeedsUpdate:(NSMenu *)menu {
+    [menu removeAllItems];
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    if (menu == self.outputMenu) {
+        NSMenuItem *system = [menu addItemWithTitle:@"Follow System Output"
+            action:@selector(selectOutput:) keyEquivalent:@""];
+        system.target = self;
+        system.state = selectedOutputUID ? NSControlStateValueOff : NSControlStateValueOn;
+        [menu addItem:NSMenuItem.separatorItem];
+
+        NSDictionary<NSString *, NSString *> *outputs = audio_output_devices();
+        NSArray<NSString *> *uids = [outputs keysSortedByValueUsingSelector:@selector(localizedStandardCompare:)];
+        for (NSString *uid in uids) {
+            NSMenuItem *item = [menu addItemWithTitle:outputs[uid]
+                action:@selector(selectOutput:) keyEquivalent:@""];
+            item.target = self;
+            item.representedObject = uid;
+            item.state = [uid isEqualToString:selectedOutputUID] ? NSControlStateValueOn : NSControlStateValueOff;
+        }
+        if (selectedOutputUID && !outputs[selectedOutputUID]) {
+            NSString *title = [NSString stringWithFormat:@"%@ (disconnected)", savedOutputName ?: @"Selected soundbar"];
+            NSMenuItem *missing = [menu addItemWithTitle:title action:nil keyEquivalent:@""];
+            missing.state = NSControlStateValueOn;
+        } else if (uids.count == 0) {
+            [menu addItemWithTitle:@"No audio outputs available" action:nil keyEquivalent:@""];
+        }
+    } else if (menu == self.gainMenu) {
+        float selectedGain = [defaults floatForKey:gainKey];
+        for (NSNumber *gain in @[@0.5, @1, @2, @3, @4, @5]) {
+            NSString *title = [NSString stringWithFormat:@"%@%%", gain];
+            NSMenuItem *item = [menu addItemWithTitle:title action:@selector(selectGain:) keyEquivalent:@""];
+            item.target = self;
+            item.representedObject = gain;
+            item.state = selectedGain == gain.floatValue ? NSControlStateValueOn : NSControlStateValueOff;
+        }
+    } else if (menu == self.timeoutMenu) {
+        NSInteger selectedMinutes = [defaults integerForKey:lockMinutesKey];
+        for (NSNumber *minutes in @[@15, @30, @60]) {
+            NSString *title = [NSString stringWithFormat:@"%@ minutes", minutes];
+            NSMenuItem *item = [menu addItemWithTitle:title action:@selector(selectTimeout:) keyEquivalent:@""];
+            item.target = self;
+            item.representedObject = minutes;
+            item.state = selectedMinutes == minutes.integerValue ? NSControlStateValueOn : NSControlStateValueOff;
+        }
+    }
+}
+
+- (void)selectOutput:(NSMenuItem *)sender {
+    NSString *uid = sender.representedObject;
+    if (uid == selectedOutputUID || [uid isEqualToString:selectedOutputUID]) return;
+    selectedOutputUID = uid;
+    savedOutputName = uid ? sender.title : nil;
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    if (uid) {
+        [defaults setObject:uid forKey:outputUIDKey];
+        [defaults setObject:savedOutputName forKey:outputNameKey];
+    } else {
+        [defaults removeObjectForKey:outputUIDKey];
+        [defaults removeObjectForKey:outputNameKey];
+    }
+    audio_select_output(selectedOutputUID);
+    app_event(RouteChanged);
+    showOutput();
+}
+
+- (void)selectGain:(NSMenuItem *)sender {
+    float gain = [sender.representedObject floatValue];
+    [NSUserDefaults.standardUserDefaults setFloat:gain forKey:gainKey];
+    app_set_gain(gain);
+}
+
+- (void)selectTimeout:(NSMenuItem *)sender {
+    NSInteger minutes = [sender.representedObject integerValue];
+    [NSUserDefaults.standardUserDefaults setInteger:minutes forKey:lockMinutesKey];
+    app_set_lock_minutes((uint32_t)minutes);
+}
+
+- (void)toggle:(id)sender { app_event(playbackRequested ? Stop : Play); }
+- (void)play:(id)sender { if (!playbackRequested) app_event(Play); }
+- (void)stop:(id)sender { if (playbackRequested) app_event(Stop); }
+- (void)locked:(NSNotification *)note { dispatch_async(dispatch_get_main_queue(), ^{ app_event(Lock); }); }
+- (void)unlocked:(NSNotification *)note { dispatch_async(dispatch_get_main_queue(), ^{ app_event(Unlock); }); }
+- (void)woke:(NSNotification *)note {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        app_event(Wake);
+        showOutput();
+    });
 }
 - (void)showWindow:(id)sender {
     [NSApp activate];
@@ -246,14 +339,10 @@ static NSButton *windowButton(NSString *title, NSRect frame, id target, SEL acti
 - (void)quit:(id)sender { [NSApp terminate:nil]; }
 - (void)applicationWillTerminate:(NSNotification *)note {
     [self.timer invalidate];
-    AudioObjectPropertyAddress address = {kAudioHardwarePropertyDefaultOutputDevice,
-        kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain};
-    AudioObjectRemovePropertyListenerBlock(kAudioObjectSystemObject, &address,
-        dispatch_get_main_queue(), routeListener);
+    audio_remove_route_observer();
     [NSDistributedNotificationCenter.defaultCenter removeObserver:self];
     [NSWorkspace.sharedWorkspace.notificationCenter removeObserver:self];
-    [NSNotificationCenter.defaultCenter removeObserver:self];
-    app_event(7);
+    app_event(Quit);
 }
 @end
 
